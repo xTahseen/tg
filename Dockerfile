@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# System dependencies (ffmpeg needed)
+# System dependencies (ffmpeg needed for video note conversion)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && apt-get clean \
@@ -18,5 +18,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot files
 COPY . .
 
-# Start the bot
+# Expose Web UI port
+EXPOSE 8080
+
+# Start the bot (web UI starts automatically on port 8080)
 CMD ["python", "main.py"]

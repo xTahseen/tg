@@ -40,6 +40,8 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
+WEBUI_PASSWORD = os.getenv("WEBUI_PASSWORD", "")
+WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "securebox-secret-key-change-me")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -47,19 +49,19 @@ dp = Dispatcher()
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["file_store_bot"]
 files_collection = db["files"]
-tags_collection = db["tags"]
+folders_collection = db["folders"]   # renamed from tags_collection
 
 
 class RenameFile(StatesGroup):
     waiting_for_new_name = State()
 
 
-class AddTag(StatesGroup):
-    waiting_for_tags = State()
+class AddFolder(StatesGroup):           # renamed from AddTag
+    waiting_for_folders = State()
 
 
-class TagPagination(StatesGroup):
-    selecting_tag = State()
+class FolderPagination(StatesGroup):    # renamed from TagPagination
+    selecting_folder = State()
 
 
 def format_file_size(size_in_bytes):
@@ -88,45 +90,46 @@ async def start_cmd(message: Message):
     )
 
 
-async def tags_cmd(message: Message, state: FSMContext):
+async def folders_cmd(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    tags_cursor = tags_collection.find({"user_id": user_id}).sort("created_at", -1)
-    tags = [doc["tag"] for doc in await tags_cursor.to_list(length=1000)]
-    if not tags:
-        await message.answer("You don't have any tags yet.")
+    folders_cursor = folders_collection.find({"user_id": user_id}).sort("created_at", -1)
+    folders = [doc["folder"] for doc in await folders_cursor.to_list(length=1000)]
+    if not folders:
+        await message.answer("You don't have any folders yet.")
         return
-    await send_tag_page(message, tags, 0, state)
+    await send_folder_page(message, folders, 0, state)
 
-async def send_tag_page(message_or_cb, tags, page, state):
-    TAGS_PER_PAGE = 10
+
+async def send_folder_page(message_or_cb, folders, page, state):
+    FOLDERS_PER_PAGE = 10
     COLS = 2
-    total_tags = len(tags)
-    start = page * TAGS_PER_PAGE
-    end = start + TAGS_PER_PAGE
-    page_tags = tags[start:end]
+    total_folders = len(folders)
+    start = page * FOLDERS_PER_PAGE
+    end = start + FOLDERS_PER_PAGE
+    page_folders = folders[start:end]
 
     keyboard = []
-    for i in range(0, len(page_tags), COLS):
+    for i in range(0, len(page_folders), COLS):
         row = []
-        for tag in page_tags[i:i+COLS]:
-            row.append(InlineKeyboardButton(text=tag, callback_data=f"tag_menu:{tag}"))
+        for folder in page_folders[i:i+COLS]:
+            row.append(InlineKeyboardButton(text=f"📁 {folder}", callback_data=f"folder_menu:{folder}"))
         keyboard.append(row)
 
     nav_buttons = []
-    max_page = math.ceil(total_tags / TAGS_PER_PAGE) - 1
+    max_page = math.ceil(total_folders / FOLDERS_PER_PAGE) - 1
     if page > 0:
         nav_buttons.append(
-            InlineKeyboardButton(text="⬅️ Prev", callback_data=f"tags_page:{page-1}")
+            InlineKeyboardButton(text="⬅️ Prev", callback_data=f"folders_page:{page-1}")
         )
     if page < max_page:
         nav_buttons.append(
-            InlineKeyboardButton(text="Next ➡️", callback_data=f"tags_page:{page+1}")
+            InlineKeyboardButton(text="Next ➡️", callback_data=f"folders_page:{page+1}")
         )
     if nav_buttons:
         keyboard.append(nav_buttons)
 
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-    text = f"Your Tags (Page {page+1}/{max_page+1} | Total: {total_tags}):"
+    text = f"📁 Your Folders (Page {page+1}/{max_page+1} | Total: {total_folders}):"
 
     if isinstance(message_or_cb, Message):
         await message_or_cb.answer(text, reply_markup=markup)
@@ -135,6 +138,7 @@ async def send_tag_page(message_or_cb, tags, page, state):
             await message_or_cb.message.edit_text(text, reply_markup=markup)
         await message_or_cb.answer()
 
+
 async def forward_to_storage_channel(message: Message):
     try:
         forwarded_msg = await message.forward(STORAGE_CHANNEL_ID)
@@ -142,6 +146,7 @@ async def forward_to_storage_channel(message: Message):
     except Exception as e:
         logging.error(f"Error forwarding message to storage channel: {e}")
         return None
+
 
 async def save_file(message: Message):
     file_id = None
@@ -186,13 +191,13 @@ async def save_file(message: Message):
         if existing_file:
             mongo_id = str(existing_file["_id"])
             buttons = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Rename", callback_data=f"rename:{mongo_id}")],
-                [InlineKeyboardButton(text="Delete", callback_data=f"delete:{mongo_id}")],
-                [InlineKeyboardButton(text="Add Tag", callback_data=f"addtag:{mongo_id}")]
+                [InlineKeyboardButton(text="✏️ Rename", callback_data=f"rename:{mongo_id}")],
+                [InlineKeyboardButton(text="🗑️ Delete", callback_data=f"delete:{mongo_id}")],
+                [InlineKeyboardButton(text="📁 Add to Folder", callback_data=f"addfolder:{mongo_id}")]
             ])
             if existing_file.get("file_type") == "video":
                 buttons.inline_keyboard.append(
-                    [InlineKeyboardButton(text="Convert to Video Note", callback_data=f"convert_video_note:{mongo_id}")]
+                    [InlineKeyboardButton(text="🔄 Convert to Video Note", callback_data=f"convert_video_note:{mongo_id}")]
                 )
             await message.reply(
                 "<b>This file is already saved in your storage.</b>\n"
@@ -211,19 +216,19 @@ async def save_file(message: Message):
                 "file_name": file_name,
                 "file_size": file_size,
                 "file_type": file_type,
-                "tags": [],
+                "folders": [],      # renamed from "tags"
                 "message_date": message.date,
                 "storage_message_id": storage_message_id
             })
             mongo_id = str(result.inserted_id)
             buttons = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Rename", callback_data=f"rename:{mongo_id}")],
-                [InlineKeyboardButton(text="Delete", callback_data=f"delete:{mongo_id}")],
-                [InlineKeyboardButton(text="Add Tag", callback_data=f"addtag:{mongo_id}")]
+                [InlineKeyboardButton(text="✏️ Rename", callback_data=f"rename:{mongo_id}")],
+                [InlineKeyboardButton(text="🗑️ Delete", callback_data=f"delete:{mongo_id}")],
+                [InlineKeyboardButton(text="📁 Add to Folder", callback_data=f"addfolder:{mongo_id}")]
             ])
             if file_type == "video":
                 buttons.inline_keyboard.append(
-                    [InlineKeyboardButton(text="Convert to Video Note", callback_data=f"convert_video_note:{mongo_id}")]
+                    [InlineKeyboardButton(text="🔄 Convert to Video Note", callback_data=f"convert_video_note:{mongo_id}")]
                 )
             await message.reply(
                 "<b>File saved successfully! 🎉</b>\n"
@@ -235,6 +240,7 @@ async def save_file(message: Message):
                 parse_mode="HTML"
             )
 
+
 async def inline_query_handler(inline_query: InlineQuery):
     user_id = inline_query.from_user.id
     query = inline_query.query.lower()
@@ -245,8 +251,8 @@ async def inline_query_handler(inline_query: InlineQuery):
     for f in files:
         file_size_str = format_file_size(f.get("file_size", 0))
         message_date = f.get("message_date")
-        tags = f.get("tags", [])
-        tags_str = ", ".join(tags) if tags else "No tags"
+        folders = f.get("folders", [])
+        folders_str = ", ".join(folders) if folders else "No folders"
 
         if message_date:
             if isinstance(message_date, datetime):
@@ -256,7 +262,7 @@ async def inline_query_handler(inline_query: InlineQuery):
         else:
             message_date_str = "Unknown"
 
-        if query in f["file_name"].lower() or any(query in tag.lower() for tag in tags):
+        if query in f["file_name"].lower() or any(query in folder.lower() for folder in folders):
             file_type = f.get("file_type")
             file_id = f.get("file_id")
             title = f.get("file_name")
@@ -264,7 +270,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                 f"{file_type.capitalize()} | "
                 f"{file_size_str} | "
                 f"{message_date_str} | "
-                f"{tags_str}"
+                f"{folders_str}"
             )
 
             try:
@@ -343,6 +349,7 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     await bot.answer_inline_query(inline_query.id, results=results, cache_time=0)
 
+
 async def callback_query_handler(callback_query: CallbackQuery, state: FSMContext):
     data = callback_query.data
     user_id = callback_query.from_user.id
@@ -373,52 +380,52 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             pass
         await callback_query.answer("Please send the new name in this chat.", show_alert=True)
 
-    elif data.startswith("addtag:"):
+    elif data.startswith("addfolder:"):
         file_id = data.split(":", 1)[1]
-        await state.set_state(AddTag.waiting_for_tags)
+        await state.set_state(AddFolder.waiting_for_folders)
         await state.update_data(file_id=file_id)
         try:
-            await callback_query.message.reply("<b>Please send the tag(s) for the file (comma-separated for multiple tags):</b>", parse_mode="HTML")
+            await callback_query.message.reply("<b>Please send the folder name(s) for the file (comma-separated for multiple folders):</b>", parse_mode="HTML")
         except:
             pass
-        await callback_query.answer("Please send the tag(s) in this chat.", show_alert=True)
+        await callback_query.answer("Please send the folder name(s) in this chat.", show_alert=True)
 
-    elif data.startswith("tags_page:"):
+    elif data.startswith("folders_page:"):
         page = int(data.split(":", 1)[1])
-        tags_cursor = tags_collection.find({"user_id": user_id}).sort("created_at", -1)
-        tags = [doc["tag"] for doc in await tags_cursor.to_list(length=1000)]
-        await send_tag_page(callback_query, tags, page, state)
+        folders_cursor = folders_collection.find({"user_id": user_id}).sort("created_at", -1)
+        folders = [doc["folder"] for doc in await folders_cursor.to_list(length=1000)]
+        await send_folder_page(callback_query, folders, page, state)
 
-    elif data.startswith("tag_menu:"):
-        tag = data.split(":", 1)[1]
+    elif data.startswith("folder_menu:"):
+        folder = data.split(":", 1)[1]
         keyboard = [
-            [InlineKeyboardButton(text="🔎 Inline Search", switch_inline_query_current_chat=tag)],
-            [InlineKeyboardButton(text="Rename Tag", callback_data=f"rename_tag_menu:{tag}")],
-            [InlineKeyboardButton(text="Delete Tag", callback_data=f"delete_tag_menu:{tag}")]
+            [InlineKeyboardButton(text="🔎 Inline Search", switch_inline_query_current_chat=folder)],
+            [InlineKeyboardButton(text="✏️ Rename Folder", callback_data=f"rename_folder_menu:{folder}")],
+            [InlineKeyboardButton(text="🗑️ Delete Folder", callback_data=f"delete_folder_menu:{folder}")]
         ]
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         await callback_query.message.edit_text(
-            f"Tag: <b>{tag}</b>\n\nChoose an action:",
+            f"📁 Folder: <b>{folder}</b>\n\nChoose an action:",
             reply_markup=markup,
             parse_mode="HTML"
         )
         await callback_query.answer()
 
-    elif data.startswith("rename_tag_menu:"):
-        tag = data.split(":", 1)[1]
-        await state.set_state(TagPagination.selecting_tag)
-        await state.update_data(tag=tag)
-        await callback_query.message.reply(f"<b>Send the new name for the tag</b> <b>{tag}</b>:", parse_mode="HTML")
+    elif data.startswith("rename_folder_menu:"):
+        folder = data.split(":", 1)[1]
+        await state.set_state(FolderPagination.selecting_folder)
+        await state.update_data(folder=folder)
+        await callback_query.message.reply(f"<b>Send the new name for the folder</b> <b>{folder}</b>:", parse_mode="HTML")
         await callback_query.answer()
 
-    elif data.startswith("delete_tag_menu:"):
-        tag = data.split(":", 1)[1]
+    elif data.startswith("delete_folder_menu:"):
+        folder = data.split(":", 1)[1]
         await files_collection.update_many(
-            {"user_id": user_id, "tags": tag},
-            {"$pull": {"tags": tag}}
+            {"user_id": user_id, "folders": folder},
+            {"$pull": {"folders": folder}}
         )
-        await tags_collection.delete_one({"user_id": user_id, "tag": tag})
-        await callback_query.message.edit_text(f"<b>Tag {tag} has been deleted from your files.</b>", parse_mode="HTML")
+        await folders_collection.delete_one({"user_id": user_id, "folder": folder})
+        await callback_query.message.edit_text(f"<b>📁 Folder '{folder}' has been deleted.</b>", parse_mode="HTML")
         await callback_query.answer()
 
     elif data.startswith("convert_video_note:"):
@@ -428,7 +435,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             await callback_query.answer("File not found.", show_alert=True)
             return
         tg_file_id = file_doc.get("file_id")
-        message = callback_query.message  # The message with the button!
+        message = callback_query.message
         keyboard = message.reply_markup
 
         def make_bar(pct):
@@ -508,6 +515,7 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
             )
             await callback_query.answer("Failed to convert or send video note.", show_alert=True)
 
+
 async def rename_file_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     file_id = data.get("file_id")
@@ -521,100 +529,96 @@ async def rename_file_handler(message: Message, state: FSMContext):
     await message.reply(f"<b>File renamed to:</b> {new_name}", parse_mode="HTML")
     await state.clear()
 
-async def tag_reply_handler(message: Message, state: FSMContext):
+
+async def folder_reply_handler(message: Message, state: FSMContext):
     data = await state.get_data()
     file_id = data.get("file_id")
     if not file_id:
         await message.reply("<b>Something went wrong. Try again.</b>", parse_mode="HTML")
         return
 
-    tags = [tag.strip() for tag in message.text.split(",")]
+    folders = [folder.strip() for folder in message.text.split(",")]
     object_id = ObjectId(file_id)
-    await files_collection.update_one({"_id": object_id}, {"$set": {"tags": tags}})
-    for tag in tags:
-        await tags_collection.update_one(
-            {"user_id": message.from_user.id, "tag": tag},
+    await files_collection.update_one({"_id": object_id}, {"$set": {"folders": folders}})
+    for folder in folders:
+        await folders_collection.update_one(
+            {"user_id": message.from_user.id, "folder": folder},
             {"$setOnInsert": {"created_at": datetime.utcnow()}},
             upsert=True
         )
-    await message.reply(f"<b>Tags added:</b> {', '.join(tags)}", parse_mode="HTML")
+    await message.reply(f"<b>📁 Added to folders:</b> {', '.join(folders)}", parse_mode="HTML")
     await state.clear()
 
-async def rename_tag_reply_handler(message: Message, state: FSMContext):
+
+async def rename_folder_reply_handler(message: Message, state: FSMContext):
     data = await state.get_data()
-    old_tag = data.get("tag")
+    old_folder = data.get("folder")
     user_id = message.from_user.id
-    new_tag = message.text.strip()
-    if not old_tag or not new_tag:
+    new_folder = message.text.strip()
+    if not old_folder or not new_folder:
         await message.reply("<b>Something went wrong. Try again.</b>", parse_mode="HTML")
         return
     await files_collection.update_many(
-        {"user_id": user_id, "tags": old_tag},
-        {"$set": {"tags.$[elem]": new_tag}},
-        array_filters=[{"elem": old_tag}]
+        {"user_id": user_id, "folders": old_folder},
+        {"$set": {"folders.$[elem]": new_folder}},
+        array_filters=[{"elem": old_folder}]
     )
-    tag_doc = await tags_collection.find_one({"user_id": user_id, "tag": old_tag})
-    if tag_doc:
-        created_at = tag_doc.get("created_at", datetime.utcnow())
-        await tags_collection.delete_one({"user_id": user_id, "tag": old_tag})
-        await tags_collection.update_one(
-            {"user_id": user_id, "tag": new_tag},
+    folder_doc = await folders_collection.find_one({"user_id": user_id, "folder": old_folder})
+    if folder_doc:
+        created_at = folder_doc.get("created_at", datetime.utcnow())
+        await folders_collection.delete_one({"user_id": user_id, "folder": old_folder})
+        await folders_collection.update_one(
+            {"user_id": user_id, "folder": new_folder},
             {"$setOnInsert": {"created_at": created_at}},
             upsert=True
         )
-    await message.reply(f"<b>Tag</b> <b>{old_tag}</b> <b>renamed to</b> <b>{new_tag}</b>.", parse_mode="HTML")
+    await message.reply(f"<b>📁 Folder</b> <b>{old_folder}</b> <b>renamed to</b> <b>{new_folder}</b>.", parse_mode="HTML")
     await state.clear()
+
 
 async def sticker_cmd(message: Message):
     await list_sticker_packs(message, db)
 
+
 async def handle_sticker(message: Message):
     await add_sticker_to_pack(message, bot, db)
-
-async def start_webui():
-    """Launch the WebUI server alongside the Telegram bot."""
-    from aiohttp import web
-    from webui import create_app
-    webui_port = int(os.getenv("WEBUI_PORT", "8080"))
-    app = create_app(MONGO_URI)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", webui_port)
-    await site.start()
-    logging.info(f"WebUI started at http://0.0.0.0:{webui_port}")
 
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     dp.message.register(start_cmd, Command(commands=["start"]))
-    dp.message.register(tags_cmd, Command(commands=["tags"]))
+    dp.message.register(folders_cmd, Command(commands=["folders"]))
     dp.message.register(sticker_cmd, Command(commands=["sticker"]))
     dp.message.register(save_file, lambda msg: msg.document or msg.video or msg.audio or msg.photo or msg.voice or msg.video_note)
     dp.message.register(rename_file_handler, RenameFile.waiting_for_new_name)
-    dp.message.register(tag_reply_handler, AddTag.waiting_for_tags)
-    dp.message.register(rename_tag_reply_handler, TagPagination.selecting_tag)
+    dp.message.register(folder_reply_handler, AddFolder.waiting_for_folders)
+    dp.message.register(rename_folder_reply_handler, FolderPagination.selecting_folder)
     dp.message.register(handle_sticker, lambda message: message.sticker is not None)
     dp.inline_query.register(inline_query_handler)
     dp.callback_query.register(callback_query_handler)
 
-    for _attempt in range(3):
-        try:
-            await bot.set_my_commands([
-                BotCommand(command="start", description="Start interacting with the bot"),
-                BotCommand(command="tags", description="Show your tags"),
-                BotCommand(command="sticker", description="View your sticker packs"),
-            ])
-            break
-        except Exception as _e:
-            if _attempt < 2:
-                await asyncio.sleep(5)
-            else:
-                print(f"Warning: Could not set bot commands: {_e}")
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Start interacting with the bot"),
+        BotCommand(command="folders", description="Browse your folders"),
+        BotCommand(command="sticker", description="View your sticker packs"),
+    ])
 
-    # Start WebUI in background
-    await start_webui()
+    # Start the web UI alongside polling
+    from webui import create_app
+    from aiohttp import web as aio_web
+    app = create_app(
+        files_collection=files_collection,
+        folders_collection=folders_collection,
+        bot_instance=bot
+    )
+    runner = aio_web.AppRunner(app)
+    await runner.setup()
+    site = aio_web.TCPSite(runner, "0.0.0.0", int(os.getenv("WEBUI_PORT", 8080)))
+    await site.start()
+    logging.info("Web UI started on port %s", os.getenv("WEBUI_PORT", 8080))
 
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
