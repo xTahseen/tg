@@ -466,6 +466,13 @@ async def handle_files(request: web.Request) -> web.Response:
       </div>
     </div>""" for _ in range(8))
 
+    type_sidebar_items = "".join(
+        '<div class="sb-item" onclick="filterTypeSb(\'' + ft + '\')">'
+        + _file_icon(ft, 16) + ' ' + ft.replace("_", " ").title()
+        + ' <span class="sb-badge">' + str(by_type[ft]["count"]) + '</span></div>'
+        for ft in type_order if ft in by_type
+    )
+
     return _page(f"""
 <nav>
   <a href="/files" class="nav-logo">
@@ -491,7 +498,7 @@ async def handle_files(request: web.Request) -> web.Response:
     </div>
     <div class="sb-divider"></div>
     <div class="sb-label">File Types</div>
-    {"".join(f'<div class="sb-item" onclick="filterTypeSb(\\"{ft}\\")">{_file_icon(ft,16)} {ft.replace("_"," ").title()} <span class="sb-badge">{by_type[ft]["count"]}</span></div>' for ft in type_order if ft in by_type)}
+    {type_sidebar_items}
   </aside>
 
   <div class="main">
@@ -730,7 +737,7 @@ function doSearch() {{ load(); }}
 function updateTitle() {{
   const t = document.getElementById('toolbar-title');
   if (searchQ) t.textContent = `Search: "${{searchQ}}"`;
-  else if (currentFilter) t.textContent = currentFilter.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase()) + ' Files';
+  else if (currentFilter) t.textContent = currentFilter.replace('_', ' ').split(' ').map(function(w){{return w.charAt(0).toUpperCase()+w.slice(1)}}).join(' ') + ' Files';
   else t.textContent = 'All Files';
 }}
 

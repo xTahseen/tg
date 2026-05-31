@@ -597,11 +597,19 @@ async def main():
     dp.inline_query.register(inline_query_handler)
     dp.callback_query.register(callback_query_handler)
 
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Start interacting with the bot"),
-        BotCommand(command="tags", description="Show your tags"),
-        BotCommand(command="sticker", description="View your sticker packs"),
-    ])
+    for _attempt in range(3):
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Start interacting with the bot"),
+                BotCommand(command="tags", description="Show your tags"),
+                BotCommand(command="sticker", description="View your sticker packs"),
+            ])
+            break
+        except Exception as _e:
+            if _attempt < 2:
+                await asyncio.sleep(5)
+            else:
+                print(f"Warning: Could not set bot commands: {_e}")
 
     # Start WebUI in background
     await start_webui()
