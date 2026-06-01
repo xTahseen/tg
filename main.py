@@ -626,15 +626,7 @@ async def main():
     dp.inline_query.register(inline_query_handler)
     dp.callback_query.register(callback_query_handler)
 
-    await bot.set_my_commands([
-        BotCommand(command="start",        description="Start SecureBox"),
-        BotCommand(command="folders",      description="Browse folders"),
-        BotCommand(command="createfolder", description="Create a new folder"),
-        BotCommand(command="setpassword",  description="Set WebUI password"),
-        BotCommand(command="sticker",      description="View sticker packs"),
-    ])
-
-    # Start Web UI
+    # Start Web UI FIRST so Koyeb health check passes immediately
     from webui import create_app
     from aiohttp import web as aio_web
     app = create_app(
@@ -648,7 +640,20 @@ async def main():
     await aio_web.TCPSite(runner, "0.0.0.0", WEBUI_PORT).start()
     logging.info("WebUI running on port %s", WEBUI_PORT)
 
-    await dp.start_polling(bot)
+    # Set bot commands wrapped so a Telegram timeout does not crash startup
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start",        description="Start SecureBox"),
+            BotCommand(command="folders",      description="Browse folders"),
+            BotCommand(command="createfolder", description="Create a new folder"),
+            BotCommand(command="setpassword",  description="Set WebUI password"),
+            BotCommand(command="sticker",      description="View sticker packs"),
+        ])
+        logging.info("Bot commands registered")
+    except Exception as e:
+        logging.warning("Could not set bot commands (will retry on next start): %s", e)
+
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "inline_query"])
 
 
 if __name__ == "__main__":
