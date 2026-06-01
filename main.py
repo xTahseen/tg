@@ -134,8 +134,15 @@ async def createfolder_name_handler(message: Message, state: FSMContext):
         return
     await state.update_data(folder_name=name)
     # Ask for parent folder
-    folders_cursor = folders_collection.find({"user_id": uid, "parent": None}).sort("name", 1)
-    root_folders   = [doc["name"] for doc in await folders_cursor.to_list(length=50)]
+    folders_cursor = folders_collection.find({"user_id": uid})
+    raw_rf = await folders_cursor.to_list(length=100)
+    seen_rf = set()
+    root_folders = []
+    for doc in raw_rf:
+        n = doc.get("name") or doc.get("folder")
+        if n and n not in seen_rf:
+            seen_rf.add(n); root_folders.append(n)
+    root_folders.sort(key=str.lower)
     keyboard = [[InlineKeyboardButton(text="📂 Root (no parent)", callback_data="set_parent:__root__")]]
     for f in root_folders:
         keyboard.append([InlineKeyboardButton(text=f"📁 {f}", callback_data=f"set_parent:{f}")])
@@ -180,10 +187,26 @@ async def show_folders_at(message_or_cb, parent, state):
     else:
         uid = message_or_cb.from_user.id
 
-    folders_cursor = folders_collection.find(
-        {"user_id": uid, "parent": parent}
-    ).sort("name", 1)
-    folders = await folders_cursor.to_list(length=100)
+    # Support both old schema ("folder" field) and new schema ("name" field)
+    # Old docs: {"user_id":uid, "folder":"xyz"}  — no "parent" field
+    # New docs: {"user_id":uid, "name":"xyz", "parent": None|"parentname"}
+    if parent is None:
+        # Root: new-style docs with parent=None, plus old-style docs (no "name" key)
+        folders_cursor = folders_collection.find({"user_id": uid})
+    else:
+        folders_cursor = folders_collection.find({"user_id": uid, "parent": parent})
+
+    raw_folders = await folders_cursor.to_list(length=100)
+
+    # Normalize: extract folder name from whichever field exists
+    seen = set()
+    folders = []
+    for f in raw_folders:
+        fname = f.get("name") or f.get("folder")
+        if fname and fname not in seen:
+            seen.add(fname)
+            folders.append({"name": fname, "parent": f.get("parent")})
+    folders.sort(key=lambda x: x["name"].lower())
 
     if not folders:
         text = "📭 No folders yet.\nUse /createfolder to make one."
@@ -393,8 +416,8 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await files_collection.update_many(
             {"user_id": uid, "folders": folder}, {"$pull": {"folders": folder}}
         )
-        await folders_collection.delete_one({"user_id": uid, "name": folder})
-        # also delete subfolders
+        # Delete both old schema (field "folder") and new schema (field "name")
+        await folders_collection.delete_many({"user_id": uid, "$or": [{"name": folder}, {"folder": folder}]})
         await folders_collection.delete_many({"user_id": uid, "parent": folder})
         await callback_query.message.edit_text(f"🗑️ Folder <b>{folder}</b> deleted.", parse_mode="HTML")
         await callback_query.answer()
@@ -426,7 +449,14 @@ async def callback_query_handler(callback_query: CallbackQuery, state: FSMContex
         await state.update_data(file_id=fid)
         # Show existing folders as quick options
         folders_cursor = folders_collection.find({"user_id": uid}).sort("name", 1)
-        existing = [doc["name"] for doc in await folders_cursor.to_list(length=50)]
+        raw_ex = await folders_cursor.to_list(length=100)
+        seen_ex = set()
+        existing = []
+        for doc in raw_ex:
+            n = doc.get("name") or doc.get("folder")
+            if n and n not in seen_ex:
+                seen_ex.add(n); existing.append(n)
+        existing.sort(key=str.lower)
         kb = []
         for f in existing:
             kb.append([InlineKeyboardButton(text=f"📁 {f}", callback_data=f"quickfolder:{fid}:{f}")])
@@ -504,8 +534,12 @@ async def rename_folder_reply_handler(message: Message, state: FSMContext):
         {"$set": {"folders.$[elem]": new_folder}},
         array_filters=[{"elem": old_folder}]
     )
-    await folders_collection.update_one(
+    # Update both old schema (field "folder") and new schema (field "name")
+    await folders_collection.update_many(
         {"user_id": uid, "name": old_folder}, {"$set": {"name": new_folder}}
+    )
+    await folders_collection.update_many(
+        {"user_id": uid, "folder": old_folder}, {"$set": {"folder": new_folder, "name": new_folder}}
     )
     await message.reply(f"✅ Folder renamed to <b>{new_folder}</b>")
     await state.clear()

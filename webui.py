@@ -500,15 +500,25 @@ async def handle_files(request: web.Request) -> web.Response:
     uid          = request["uid"]
     folders_col  = request.app["folders_col"]
 
-    # Build sidebar folder list (root folders)
-    cursor = folders_col.find({"user_id": uid, "parent": None}).sort("name", 1)
-    root_folders = await cursor.to_list(length=100)
+    # Build sidebar folder list — support both old ("folder") and new ("name") schema
+    cursor = folders_col.find({"user_id": uid}).sort("name", 1)
+    all_folder_docs = await cursor.to_list(length=200)
+
+    # Normalize and deduplicate
+    seen = set()
+    root_folders = []
+    for f in all_folder_docs:
+        fname = f.get("name") or f.get("folder")
+        if fname and fname not in seen:
+            seen.add(fname)
+            root_folders.append(fname)
+    root_folders.sort(key=str.lower)
 
     sidebar_folders_html = ""
-    for f in root_folders:
-        fn = f["name"].replace("'","&#39;").replace('"',"&quot;")
+    for fname in root_folders:
+        fn = fname.replace("'","&#39;").replace('"',"&quot;")
         sidebar_folders_html += f"""<div class="sb-folder" data-folder="{fn}"
-          onclick="navFolder('{fn}',null)">{_icon("folder",14)} <span class="sb-folder-name">{f['name']}</span></div>"""
+          onclick="navFolder('{fn}',null)">{_icon("folder",14)} <span class="sb-folder-name">{fname}</span></div>"""
 
     skel = "".join(f"""<div class="file-item">
       <div class="fi-cb"><div class="custom-cb"></div></div>
@@ -1092,9 +1102,20 @@ async def api_files(request: web.Request) -> web.Response:
     folders_col = request.app["folders_col"]
     folder      = request.rel_url.query.get("folder") or None
 
-    # Sub-folders at this level
-    sub_cursor = folders_col.find({"user_id": uid, "parent": folder}).sort("name", 1)
-    sub_folders = [{"name": d["name"]} for d in await sub_cursor.to_list(100)]
+    # Sub-folders at this level — support both old ("folder") and new ("name") schema
+    sub_cursor = folders_col.find({"user_id": uid})
+    all_fdocs  = await sub_cursor.to_list(200)
+    seen_sf, sub_folders = set(), []
+    for d in all_fdocs:
+        n = d.get("name") or d.get("folder")
+        # For root view show all folders; for subfolder view filter by parent
+        if folder:
+            if d.get("parent") == folder and n and n not in seen_sf:
+                seen_sf.add(n); sub_folders.append({"name": n})
+        else:
+            if n and n not in seen_sf:
+                seen_sf.add(n); sub_folders.append({"name": n})
+    sub_folders.sort(key=lambda x: x["name"].lower())
 
     # Files in this folder
     q = {"user_id": uid}
@@ -1121,9 +1142,15 @@ async def api_files(request: web.Request) -> web.Response:
 async def api_folders_tree(request: web.Request) -> web.Response:
     uid         = request["uid"]
     folders_col = request.app["folders_col"]
-    cursor = folders_col.find({"user_id": uid}).sort("name", 1)
+    cursor = folders_col.find({"user_id": uid})
     docs   = await cursor.to_list(200)
-    return web.json_response({"folders": [d["name"] for d in docs]})
+    seen, names = set(), []
+    for d in docs:
+        n = d.get("name") or d.get("folder")
+        if n and n not in seen:
+            seen.add(n); names.append(n)
+    names.sort(key=str.lower)
+    return web.json_response({"folders": names})
 
 
 @require_auth
